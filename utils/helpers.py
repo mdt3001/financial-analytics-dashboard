@@ -60,46 +60,67 @@ def process_prediction_input(
     loan_status: str,
     purpose: str,
     verification_status: str
-) -> np.ndarray:
+) -> pd.DataFrame:
     """
-    Xử lý input từ form và tạo feature vector cho model dự đoán Interest Rate.
+    Xử lý input từ form và tạo feature DataFrame cho model dự đoán Interest Rate.
+    
+    Model yêu cầu 19 features với tên chính xác (CatBoost cần tên có space):
+    - dti, installment, loan_amount, total_payment, term_months, grade_num
+    - loan_status_Charged Off, loan_status_Current, loan_status_Fully Paid
+    - purpose_Debt consolidation
+    - verification_status_Not Verified, verification_status_Verified
+    - grade_A, grade_B, grade_C, grade_D, grade_E, grade_F, grade_G
     """
-    features = np.zeros(19)
+    # Feature names in exact order model expects (with SPACES for CatBoost)
+    feature_names = [
+        'dti', 'installment', 'loan_amount', 'total_payment', 'term_months', 'grade_num',
+        'loan_status_Charged Off', 'loan_status_Current', 'loan_status_Fully Paid',
+        'purpose_Debt consolidation',
+        'verification_status_Not Verified', 'verification_status_Verified',
+        'grade_A', 'grade_B', 'grade_C', 'grade_D', 'grade_E', 'grade_F', 'grade_G'
+    ]
+    
+    # Initialize all features to 0
+    data = {name: [0] for name in feature_names}
     
     # Numerical features
-    features[0] = dti
-    features[1] = installment
-    features[2] = loan_amount
-    features[3] = total_payment
-    features[4] = term_months
+    data['dti'] = [dti]
+    data['installment'] = [installment]
+    data['loan_amount'] = [loan_amount]
+    data['total_payment'] = [total_payment]
+    data['term_months'] = [term_months]
     
     # grade_num: A=1, B=2, ..., G=7
     grade_num_mapping = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7}
-    features[5] = grade_num_mapping.get(grade, 3)
+    data['grade_num'] = [grade_num_mapping.get(grade, 3)]
     
-    # loan_status one-hot (indices 6-8)
+    # loan_status one-hot (WITH SPACES!)
     if loan_status == 'Charged Off':
-        features[6] = 1
+        data['loan_status_Charged Off'] = [1]
     elif loan_status == 'Current':
-        features[7] = 1
+        data['loan_status_Current'] = [1]
     elif loan_status == 'Fully Paid':
-        features[8] = 1
+        data['loan_status_Fully Paid'] = [1]
     
-    # purpose_Debt_consolidation (index 9)
-    features[9] = 1 if purpose == 'Debt consolidation' else 0
+    # purpose - only Debt consolidation (WITH SPACE!)
+    if purpose == 'Debt consolidation':
+        data['purpose_Debt consolidation'] = [1]
     
-    # verification_status (indices 10-11)
+    # verification_status (WITH SPACES!)
     if verification_status == 'Not Verified':
-        features[10] = 1
+        data['verification_status_Not Verified'] = [1]
     elif verification_status == 'Verified':
-        features[11] = 1
+        data['verification_status_Verified'] = [1]
+    # Note: 'Source Verified' = both are 0
     
-    # grade one-hot (indices 12-18: A, B, C, D, E, F, G)
-    grade_onehot_mapping = {'A': 12, 'B': 13, 'C': 14, 'D': 15, 'E': 16, 'F': 17, 'G': 18}
-    if grade in grade_onehot_mapping:
-        features[grade_onehot_mapping[grade]] = 1
+    # grade one-hot
+    if grade in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
+        data[f'grade_{grade}'] = [1]
     
-    return features.reshape(1, -1)
+    # Create DataFrame with correct column order
+    df = pd.DataFrame(data)
+    
+    return df[feature_names]
 
 
 def get_rate_category(rate: float) -> Tuple[str, str, str]:
