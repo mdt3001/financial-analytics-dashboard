@@ -4,7 +4,7 @@ AI Prediction tab component.
 
 import streamlit as st
 
-from utils import load_model, calculate_installment, process_prediction_input, get_rate_category
+from utils import load_model, load_scaler, calculate_installment, process_prediction_input, get_rate_category
 from charts import create_rate_gauge, create_rate_comparison_chart
 from config.settings import PURPOSE_OPTIONS
 
@@ -16,7 +16,7 @@ def render_prediction_tab():
     <div style="background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); 
                 padding: 20px; border-radius: 15px; margin-bottom: 20px;">
         <p style="margin: 0; color: #333;">
-            <strong>About this model:</strong> Uses a Stacking Regressor ensemble model 
+            <strong>About this model:</strong> Uses an XGBoost model 
             trained on historical data to predict the <strong>Interest Rate</strong> 
             that a borrower will receive based on their credit profile.
         </p>
@@ -24,12 +24,15 @@ def render_prediction_tab():
     """, unsafe_allow_html=True)
     
     model = load_model()
+    scaler = load_scaler()
     
     if model is None:
         _render_model_unavailable()
+    elif scaler is None:
+        _render_scaler_unavailable()
     else:
-        st.success("✅ Model loaded successfully!")
-        _render_prediction_form(model)
+        st.success("✅ Model and Scaler loaded successfully!")
+        _render_prediction_form(model, scaler)
 
 
 def _render_model_unavailable():
@@ -38,12 +41,23 @@ def _render_model_unavailable():
     ⚠️ **Model Unavailable**
     
     Unable to load prediction model. Please check:
-    1. File `stacking.joblib` exists in the working directory
-    2. Required libraries are installed: `pip install joblib xgboost catboost scikit-learn`
+    1. File `xgb.joblib` exists in the working directory
+    2. Required libraries are installed: `pip install joblib xgboost`
     """)
 
 
-def _render_prediction_form(model):
+def _render_scaler_unavailable():
+    """Render message when scaler is unavailable."""
+    st.warning("""
+    ⚠️ **Scaler Unavailable**
+    
+    Unable to load scaler. Please check:
+    1. File `scaler.pkl` exists in the working directory
+    2. Required libraries are installed: `pip install joblib scikit-learn`
+    """)
+
+
+def _render_prediction_form(model, scaler):
     """Render the prediction form and results."""
     st.markdown("#### Enter Loan Information")
     
@@ -75,18 +89,19 @@ def _render_prediction_form(model):
             index=2,
             help="Credit grade assessment (A=Best, G=Highest Risk)"
         )
+        
+        sub_grade = st.selectbox(
+            "Sub Grade",
+            options=['1', '2', '3', '4', '5'],
+            index=2,
+            help="Sub grade within the credit grade (1=Best, 5=Worst)"
+        )
     
     with col2:
         purpose = st.selectbox(
             "Loan Purpose",
             options=PURPOSE_OPTIONS,
-            help="Purpose of the loan"
-        )
-        
-        loan_status = st.selectbox(
-            "Expected Status",
-            options=['Current', 'Fully Paid', 'Charged Off'],
-            help="Expected loan status"
+            help="Purpose of the loan (Debt consolidation affects rate)"
         )
         
         verification_status = st.selectbox(
@@ -95,39 +110,45 @@ def _render_prediction_form(model):
             help="Income verification status"
         )
         
-        est_total_payment = st.number_input(
-            "Estimated Total Payment ($)",
-            min_value=loan_amount, max_value=loan_amount * 2,
-            value=int(loan_amount * 1.3), step=500,
-            help="Estimated total amount to be paid (principal + interest)"
-        )
-    
-    # Calculate installment estimate
-    est_int_rate = ((est_total_payment / loan_amount) - 1) / (term_months / 12)
-    est_installment = calculate_installment(loan_amount, est_int_rate, term_months)
-    
-    st.info(f"**Estimated Installment:** ${est_installment:,.2f}/month (based on your total payment input)")
+        # Show grade_encoded calculation
+        from utils.helpers import calculate_grade_encoded
+        grade_encoded = calculate_grade_encoded(grade, sub_grade)
+        st.info(f"**Grade Encoded:** {grade_encoded} (calculated from {grade}{sub_grade})")
+        
+        # Show purpose_debt info
+        purpose_debt = 1 if purpose == 'Debt consolidation' else 0
+        st.info(f"**Purpose Debt:** {purpose_debt} ({'Debt consolidation' if purpose_debt else 'Other purpose'})")
     
     # Predict button
     if st.button("Predict Interest Rate", use_container_width=True, type="primary"):
         _make_prediction(
-            model, dti, est_installment, loan_amount, est_total_payment,
-            term_months, grade, loan_status, purpose, verification_status
+            model, scaler, dti, loan_amount, term_months,
+            grade, sub_grade, verification_status, purpose
         )
 
 
-def _make_prediction(model, dti, installment, loan_amount, total_payment,
-                     term_months, grade, loan_status, purpose, verification_status):
+def _make_prediction(model, scaler, dti, loan_amount, term_months,
+                     grade, sub_grade, verification_status, purpose):
     """Make prediction and display results."""
     try:
+        # Process input features
         features = process_prediction_input(
-            dti=dti, installment=installment, loan_amount=loan_amount,
-            total_payment=total_payment, term_months=term_months,
-            grade=grade, loan_status=loan_status,
-            purpose=purpose, verification_status=verification_status
+            dti=dti,
+            loan_amount=loan_amount,
+            term_months=term_months,
+            grade=grade,
+            sub_grade=sub_grade,
+            verification_status=verification_status,
+            purpose=purpose
         )
         
-        predicted_rate = model.predict(features)[0]
+        # Scale features
+        features_scaled = scaler.transform(features)
+        
+        # Predict
+        predicted_rate = model.predict(features_scaled)[0]
+        
+        # Convert to percentage if needed
         if predicted_rate < 1:
             predicted_rate = predicted_rate * 100
         
@@ -135,7 +156,7 @@ def _make_prediction(model, dti, installment, loan_amount, total_payment,
         
         _display_prediction_results(
             predicted_rate, category, color, description,
-            loan_amount, term_months, grade, dti, verification_status
+            loan_amount, term_months, grade, sub_grade, dti, verification_status
         )
         
     except Exception as e:
@@ -144,7 +165,7 @@ def _make_prediction(model, dti, installment, loan_amount, total_payment,
 
 
 def _display_prediction_results(predicted_rate, category, color, description,
-                                 loan_amount, term_months, grade, dti, verification_status):
+                                 loan_amount, term_months, grade, sub_grade, dti, verification_status):
     """Display prediction results."""
     st.markdown("---")
     st.markdown("### Prediction Results")
@@ -171,7 +192,7 @@ def _display_prediction_results(predicted_rate, category, color, description,
         st.plotly_chart(fig_gauge, use_container_width=True)
     
     # Payment details
-    _display_payment_details(predicted_rate, loan_amount, term_months, grade, category)
+    _display_payment_details(predicted_rate, loan_amount, term_months, grade, sub_grade, category)
     
     # Comparison chart
     st.markdown("### Interest Rate Comparison by Grade")
@@ -180,10 +201,10 @@ def _display_prediction_results(predicted_rate, category, color, description,
     
     # Tips
     if predicted_rate > 12:
-        _display_improvement_tips(dti, grade, verification_status, loan_amount)
+        _display_improvement_tips(dti, grade, sub_grade, verification_status, loan_amount)
 
 
-def _display_payment_details(predicted_rate, loan_amount, term_months, grade, category):
+def _display_payment_details(predicted_rate, loan_amount, term_months, grade, sub_grade, category):
     """Display payment details based on predicted rate."""
     st.markdown("### Loan Details with Predicted Rate")
     
@@ -205,9 +226,10 @@ def _display_payment_details(predicted_rate, loan_amount, term_months, grade, ca
                   delta=f"{(actual_total_interest/loan_amount)*100:.1f}% of principal")
     
     with col4:
-        st.metric(label="Credit Grade", value=grade, delta=category)
+        st.metric(label="Credit Grade", value=f"{grade}{sub_grade}", delta=category)
 
-def _display_improvement_tips(dti, grade, verification_status, loan_amount):
+
+def _display_improvement_tips(dti, grade, sub_grade, verification_status, loan_amount):
     """Display tips to improve interest rate."""
     st.markdown("### 💡 Tips to Improve Your Interest Rate")
     tips = []
@@ -220,6 +242,8 @@ def _display_improvement_tips(dti, grade, verification_status, loan_amount):
         tips.append("Verify Income: Provide income verification documents to increase credibility")
     if loan_amount > 25000:
         tips.append("Reduce Loan Amount: Borrowing less may help lower your interest rate")
+    if sub_grade in ['4', '5']:
+        tips.append("Improve Sub Grade: Work on improving your credit to get a better sub grade")
     
     if tips:
         for tip in tips:
